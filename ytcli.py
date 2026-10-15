@@ -44,6 +44,7 @@ SHORTS_MAX_SECONDS = 60
 WATCH_URL = "https://youtube.com/watch?v={}"
 WHITELIST_FILE = "whitelist.txt"
 WATCH_LATER_FILE = "watch-later.txt"
+WATCHED_FILE = "watched.txt"
 GRAB_BAG_PLAYLIST = "AI Grab Bag"
 TOKEN_FILE = "token.json"
 OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
@@ -430,9 +431,40 @@ def fetch_recent_videos(session, channel_id):
     return regular[:MAX_RESULTS]
 
 
-def print_videos(videos):
+def watched_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), WATCHED_FILE)
+
+
+def load_watched_ids():
+    path = watched_path()
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        return [line.strip() for line in fh if VIDEO_ID_RE.fullmatch(line.strip())]
+
+
+def toggle_watched(video):
+    ids = load_watched_ids()
+    if video["id"] in ids:
+        ids.remove(video["id"])
+        action = "Marked unwatched"
+    else:
+        ids.append(video["id"])
+        action = "Marked watched"
+    with open(watched_path(), "w", encoding="utf-8") as fh:
+        for video_id in ids:
+            fh.write(f"{video_id}\n")
+    return f"{action}: {video['title']}"
+
+
+def print_videos(videos, watched=None):
+    show_watched = watched is not None
+    watched = watched or []
     for i, video in enumerate(videos, 1):
-        print(f"{i}. {video['title']}")
+        prefix = f"{i}. {video['title']}"
+        if show_watched:
+            prefix = f"{i}. [{'x' if video['id'] in watched else ' '}] {video['title']}"
+        print(prefix)
         line = f"   {video['published']}  {video['duration']}"
         if video.get("thumbnail"):
             line += f"  thumb={video['thumbnail']}"
@@ -523,14 +555,17 @@ def remove_from_watch_later(video):
     return f"Removed from {WATCH_LATER_FILE}: {video['title']}"
 
 
-def video_list_view(videos, title, allow_remove=False):
+def video_list_view(videos, title, allow_remove=False, allow_watch=False):
     status = ""
     while True:
+        watched = load_watched_ids() if allow_watch else []
         clear_screen()
         print(f"=== {title} ===\n")
         if videos:
-            print_videos(videos)
+            print_videos(videos, watched)
             actions = f"Open [1-{len(videos)}], save [s1,s3]"
+            if allow_watch:
+                actions += ", watched [w1,w3]"
             if allow_remove:
                 actions += ", remove [d1,d3]"
             prompt = f"\n{actions}, Enter=back, q=quit: "
@@ -552,6 +587,15 @@ def video_list_view(videos, title, allow_remove=False):
                 continue
             picks, warnings = parse_picks(rest, len(videos))
             messages = warnings + [save_to_watch_later(videos[i - 1]) for i in picks]
+            status = "\n".join(messages)
+            continue
+        if videos and allow_watch and choice[0] == "w":
+            rest = choice[7:] if choice.startswith("watched") else choice[1:]
+            if not rest.replace(" ", "").rstrip(","):
+                status = f"Usage: w1,w3 to toggle watched for videos in {WATCHED_FILE}."
+                continue
+            picks, warnings = parse_picks(rest, len(videos))
+            messages = warnings + [toggle_watched(videos[i - 1]) for i in picks]
             status = "\n".join(messages)
             continue
         if videos and allow_remove and choice[0] == "d":
@@ -813,7 +857,9 @@ def search_view():
             status = f"Error: {err}"
             continue
         video_list_view(
-            videos, f"{len(videos)} most recent videos - {channel} ({channel_id})"
+            videos,
+            f"{len(videos)} most recent videos - {channel} ({channel_id})",
+            allow_watch=True,
         )
 
 
@@ -914,6 +960,7 @@ def main(argv=None):
                 video_list_view(
                     videos,
                     f"{len(videos)} most recent videos - {channel} ({channel_id})",
+                    allow_watch=True,
                 )
             else:
                 search_view()
