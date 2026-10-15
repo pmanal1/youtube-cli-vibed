@@ -1,34 +1,26 @@
 # youtube-cli
 
-TODO: one-liner describing the project.
+A highly restricted version of youtube made for me.
 
-<!-- e.g. "A tiny CLI for browsing a YouTube channel's latest videos and opening them in your browser." -->
+A tiny CLI that can browse a whitelisted channel's last 5 videos.
 
 ## Features
 
-- [ ] TODO
+- Whitelist channels that you can view.
+- View whitelisted channel's 5 most recently uploaded videos.
+- Save videos to watch later.
 
 ## Requirements
 
 - Python 3
-- A YouTube Data API v3 key (see [Setup](#setup))
-
-## Setup
-
-```sh
-pip install -r requirements.txt
-```
-
-TODO: API key / `.env` instructions.
+- A YouTube Data API v3 keys (see .env.example)
 
 ## Usage
 
-TODO
-
 ```sh
-./run-cli.sh
+.venv/bin/python ytcli.py
 ```
 
 ## Notes
 
-TODO
+This project was made with AI, hence the repo name.
