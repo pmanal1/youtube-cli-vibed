@@ -1,3 +1,3 @@
 # Channels ytcli is allowed to browse: comma-separated handles, names, or channel IDs.
 # Lines starting with # are ignored. Edit this list to add or remove channels.
-@mkbhd,@t3dotgg,@LinusTechTips,@TechnologyConnections,@ThePrimeTimeagen,@ThePrimeagen
+@mkbhd,@t3dotgg,@LinusTechTips,@TechnologyConnections,@ThePrimeTimeagen,@bmdavis419,@AtriocClips
