@@ -2,7 +2,7 @@
 """ytcli — list a YouTube channel's recent videos and open them in the browser.
 
 Usage:
-    python ytcli.py                   # full-screen menu: search, watch later,
+    python ytcli.py                   # interactive menu: search, watch later,
                                       # quit at any point
     python ytcli.py search [channel]  # list the 5 most recent videos; omit
                                       # the channel to pick from whitelist.txt
@@ -15,6 +15,11 @@ Usage:
                                       # only, --dry-run to preview)
     python ytcli.py menu              # same as no arguments
 
+Interactive menus use the arrow keys (up/down) with Enter to select, Esc to go
+back, and s/w/d on the highlighted video to save it to watch-later.txt, mark
+it watched, or remove it from watch-later.txt. When the terminal is not
+interactive (piped input), the menus fall back to numbered prompts.
+
 Browsing is restricted to the comma-separated channels listed in whitelist.txt.
 Requires a YouTube Data API v3 key in the YOUTUBE_API_KEY environment variable
 or a .env file (see .env.example). Free key: https://console.cloud.google.com/
@@ -24,11 +29,14 @@ browser once for authorization; the token is cached in token.json.
 """
 
 import argparse
+import contextlib
 import http.server
 import json
 import os
 import re
 import secrets
+import select
+import shutil
 import sys
 import time
 import webbrowser
@@ -55,8 +63,19 @@ CHANNEL_ID_RE = re.compile(r"^UC[\w-]{22}$")
 VIDEO_ID_RE = re.compile(r"^[\w-]{11}$")
 DURATION_RE = re.compile(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?")
 CLEAR_SCREEN = "\033[H\033[2J\033[3J"
+BOLD_ANSI = "\033[1m"
+RESET_ANSI = "\033[0m"
+HIDE_CURSOR = "\033[?25l"
+SHOW_CURSOR = "\033[?25h"
 QUIT_WORDS = {"q", "quit", "exit"}
 BACK_WORDS = {"b", "back"}
+
+try:
+    import termios
+    import tty
+    _RAW_KEY_MODULES = True
+except ImportError:
+    _RAW_KEY_MODULES = False
 
 
 class CliError(Exception):
@@ -318,6 +337,125 @@ def read_input(prompt):
         raise QuitApp()
 
 
+_raw_console_depth = 0
+
+
+@contextlib.contextmanager
+def raw_console(enabled=True):
+    global _raw_console_depth
+    enabled = enabled and _RAW_KEY_MODULES and sys.stdin.isatty()
+    if enabled:
+        fd = sys.stdin.fileno()
+        old_state = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            _raw_console_depth += 1
+            if _raw_console_depth == 1:
+                sys.stdout.write(HIDE_CURSOR)
+                sys.stdout.flush()
+            yield
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_state)
+            _raw_console_depth -= 1
+            if _raw_console_depth == 0:
+                sys.stdout.write(SHOW_CURSOR)
+                sys.stdout.flush()
+    else:
+        yield
+
+
+def raw_keys_supported():
+    return _RAW_KEY_MODULES and sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def next_key(timeout=0.1):
+    fd = sys.stdin.fileno()
+    ready = select.select([fd], [], [], timeout)[0]
+    if not ready:
+        return None
+    ch = os.read(fd, 1).decode("utf-8", "replace")
+    if ch == "\x1b":
+        follow = select.select([fd], [], [], 0.05)[0]
+        if not follow:
+            return "escape"
+        second = os.read(fd, 1).decode("utf-8", "replace")
+        if second == "[":
+            third = os.read(fd, 1).decode("utf-8", "replace")
+            if third == "A":
+                return "up"
+            if third == "B":
+                return "down"
+            if third == "C":
+                return "right"
+            if third == "D":
+                return "left"
+        return None
+    if ch in ("\r", "\n", " "):
+        return "enter"
+    if ch in ("\x04", "\x03"):
+        return "q"
+    return ch.lower()
+
+
+def wait_key():
+    try:
+        while True:
+            key = next_key()
+            if key is not None:
+                return key
+    except KeyboardInterrupt:
+        raise QuitApp()
+
+
+def list_window_rows(entry_lines=1, fixed=5):
+    total = shutil.get_terminal_size().lines
+    return max(1, (total - fixed) // entry_lines)
+
+
+def scroll_offset(cursor, offset, rows, count):
+    rows = min(rows, count)
+    if rows <= 0:
+        return 0
+    if cursor < offset:
+        return cursor
+    if cursor >= offset + rows:
+        return cursor - rows + 1
+    return offset
+
+
+def draw_list_screen(title, entries, cursor, offset, rows, status, hints, extra_head=()):
+    clear_screen()
+    print(f"=== {title} ===")
+    for line in extra_head:
+        print(line)
+    print()
+    count = len(entries)
+    for i, entry in enumerate(entries[offset:offset + rows]):
+        index = offset + i
+        lines = entry if isinstance(entry, (list, tuple)) else [entry]
+        for j, line in enumerate(lines):
+            if index == cursor:
+                prefix = " > " if j == 0 else "   "
+                print(f"{BOLD_ANSI}{prefix}{line}{RESET_ANSI}")
+            else:
+                print(f"   {line}")
+    if count > rows:
+        shown_to = min(offset + rows, count)
+        print(f"\n  (showing {offset + 1}-{shown_to} of {count})")
+    if status:
+        print(f"\n{status}")
+    print(flush=True)
+    print(f"[{hints}]")
+
+
+def move_cursor(cursor, key, count, wrap=True):
+    if key == "up":
+        return (cursor - 1) % count if wrap else max(0, cursor - 1)
+    if key == "down":
+        return (cursor + 1) % count if wrap else min(count - 1, cursor + 1)
+    return cursor
+
+
 def api_get(session, endpoint, **params):
     resp = session.get(f"{API_BASE}/{endpoint}", params=params, timeout=15)
     if resp.status_code != 200:
@@ -555,7 +693,84 @@ def remove_from_watch_later(video):
     return f"Removed from {WATCH_LATER_FILE}: {video['title']}"
 
 
-def video_list_view(videos, title, allow_remove=False, allow_watch=False):
+def _video_entry_lines(video, watched_ids, saved_ids, allow_watch, allow_remove):
+    label = video["title"]
+    if allow_watch:
+        mark = "x" if video["id"] in watched_ids else " "
+        label = f"[{mark}] {label}"
+    elif not allow_remove and video["id"] in saved_ids:
+        label = f"+ {label}"
+    meta = f"{video['published']}  {video['duration']}"
+    if video.get("thumbnail"):
+        meta += f"  thumb={video['thumbnail']}"
+    meta += f"  id={video['id']}"
+    return [label, meta]
+
+
+def video_list_view(
+    videos, title, allow_remove=False, allow_watch=False, empty_note="The list is empty."
+):
+    if raw_keys_supported():
+        _video_list_view_keys(videos, title, allow_remove, allow_watch, empty_note)
+    else:
+        _video_list_view_numbered(videos, title, allow_remove, allow_watch)
+
+
+def _video_list_view_keys(
+    videos, title, allow_remove=False, allow_watch=False, empty_note="The list is empty."
+):
+    actions = "up/down=move, enter/right=open, s=save"
+    if allow_watch:
+        actions += ", w=watched"
+    if allow_remove:
+        actions += ", d=remove"
+    actions += ", left/esc=back, q=quit"
+    status = ""
+    cursor = 0
+    offset = 0
+    with raw_console():
+        while True:
+            watched = load_watched_ids() if allow_watch else []
+            saved_ids = set()
+            if not allow_remove:
+                saved_ids = {v["id"] for v in load_watch_later()}
+            entries = [
+                _video_entry_lines(v, watched, saved_ids, allow_watch, allow_remove)
+                for v in videos
+            ]
+            extra = ()
+            if not videos:
+                extra = (empty_note,)
+                hints = "esc=back, q=quit"
+            else:
+                hints = actions
+            rows = list_window_rows(entry_lines=2, fixed=6)
+            offset = scroll_offset(cursor, offset, rows, len(entries))
+            draw_list_screen(title, entries, cursor, offset, rows, status, hints, extra)
+            status = ""
+            key = wait_key()
+            if key == "escape":
+                return
+            if key == "q":
+                raise QuitApp()
+            if not videos:
+                continue
+            if key in ("up", "down"):
+                cursor = move_cursor(cursor, key, len(videos))
+            elif key in ("enter", "right"):
+                status = open_video(videos[cursor]["id"])
+            elif key == "left":
+                return
+            elif key == "s":
+                status = save_to_watch_later(videos[cursor])
+            elif key == "w" and allow_watch:
+                status = toggle_watched(videos[cursor])
+            elif key == "d" and allow_remove:
+                status = remove_from_watch_later(videos.pop(cursor))
+                cursor = min(cursor, max(len(videos) - 1, 0))
+
+
+def _video_list_view_numbered(videos, title, allow_remove=False, allow_watch=False):
     status = ""
     while True:
         watched = load_watched_ids() if allow_watch else []
@@ -618,7 +833,14 @@ def video_list_view(videos, title, allow_remove=False, allow_watch=False):
 
 def watch_later_view():
     videos = load_watch_later()
-    video_list_view(videos, f"Watch later ({WATCH_LATER_FILE})", allow_remove=True)
+    video_list_view(
+        videos,
+        f"Watch later ({WATCH_LATER_FILE})",
+        allow_remove=True,
+        empty_note=(
+            f"{WATCH_LATER_FILE} is empty. Run Search and press s on a video to save it."
+        ),
+    )
 
 
 def find_account_playlist(session, title):
@@ -824,6 +1046,49 @@ def grab_bag_command(keep=False, dry_run=False):
 
 def search_view():
     whitelist = load_whitelist()
+    if raw_keys_supported():
+        _search_view_keys(whitelist)
+    else:
+        _search_view_numbered(whitelist)
+
+
+def _search_view_keys(whitelist):
+    status = ""
+    cursor = 0
+    offset = 0
+    with raw_console():
+        while True:
+            rows = list_window_rows()
+            offset = scroll_offset(cursor, offset, rows, len(whitelist))
+            draw_list_screen(
+                "Search", whitelist, cursor, offset, rows, status,
+                "up/down=move, enter/right=search, left/esc=back, q=quit",
+            )
+            status = ""
+            key = wait_key()
+            if key in ("escape", "left"):
+                return
+            if key == "q":
+                raise QuitApp()
+            if key in ("up", "down"):
+                cursor = move_cursor(cursor, key, len(whitelist))
+            elif key in ("enter", "right"):
+                channel = whitelist[cursor]
+                try:
+                    session = make_session()
+                    channel_id = resolve_channel_id(session, channel)
+                    videos = fetch_recent_videos(session, channel_id)
+                except (CliError, requests.RequestException) as err:
+                    status = f"Error: {err}"
+                    continue
+                video_list_view(
+                    videos,
+                    f"{len(videos)} most recent videos - {channel} ({channel_id})",
+                    allow_watch=True,
+                )
+
+
+def _search_view_numbered(whitelist):
     status = ""
     while True:
         clear_screen()
@@ -864,6 +1129,48 @@ def search_view():
 
 
 def run_menu():
+    if raw_keys_supported():
+        _run_menu_keys()
+    else:
+        _run_menu_numbered()
+
+
+def _run_menu_keys():
+    entries = [
+        "Search a channel",
+        "Watch later",
+        f'Sync "{GRAB_BAG_PLAYLIST}" -> watch later',
+    ]
+    status = ""
+    cursor = 0
+    offset = 0
+    with raw_console():
+        while True:
+            rows = list_window_rows()
+            offset = scroll_offset(cursor, offset, rows, len(entries))
+            draw_list_screen(
+                "ytcli", entries, cursor, offset, rows, status,
+                "up/down=move, enter/right=select, left/esc=q=quit",
+            )
+            status = ""
+            key = wait_key()
+            if key in ("escape", "left", "q"):
+                raise QuitApp()
+            if key in ("up", "down"):
+                cursor = move_cursor(cursor, key, len(entries))
+            elif key in ("enter", "right"):
+                try:
+                    if cursor == 0:
+                        search_view()
+                    elif cursor == 1:
+                        watch_later_view()
+                    else:
+                        grab_bag_view()
+                except (CliError, requests.RequestException) as err:
+                    status = f"Error: {err}"
+
+
+def _run_menu_numbered():
     status = ""
     while True:
         clear_screen()

@@ -21,6 +21,18 @@ A tiny CLI that can browse a whitelisted channel's last 5 videos.
 .venv/bin/python ytcli.py
 ```
 
+Menus are navigated with the **arrow keys**: up/down to move, Enter/right to
+select (open a video or search a channel), left/Esc to go back, and `q` to
+quit. On video lists, press:
+
+- `s` — save the highlighted video to `watch-later.txt`
+- `w` — toggle the highlighted video as watched (search results)
+- `d` — remove the highlighted video from `watch-later.txt`
+
+Long lists scroll automatically as the cursor moves. When input is not a
+terminal (e.g. piping), the menus fall back to the older numbered prompts
+(`s1,s3` batch syntax still works there).
+
 ## Notes
 
 This project was made with AI, hence the repo name.
