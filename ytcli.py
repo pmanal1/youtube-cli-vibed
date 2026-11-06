@@ -407,6 +407,40 @@ def wait_key():
         raise QuitApp()
 
 
+def read_confirmation(prompt):
+    if not raw_keys_supported():
+        choice = read_input(f"{prompt} [y/N]: ").lower()
+        if choice in QUIT_WORDS:
+            raise QuitApp()
+        return choice in ("y", "yes")
+    with raw_console():
+        print(f"{prompt} [y/N] (y=yes, n/Enter/Esc=cancel, q=quit): ", end="", flush=True)
+        while True:
+            key = wait_key()
+            if key == "q":
+                raise QuitApp()
+            if key == "y":
+                print("Yes")
+                return True
+            if key in ("n", "enter", "escape", "left"):
+                print("No")
+                return False
+
+
+def wait_for_back():
+    if not raw_keys_supported():
+        read_input("\nPress Enter to go back... ")
+        return
+    with raw_console():
+        print("\nPress Enter/Esc to go back, q to quit... ", end="", flush=True)
+        while True:
+            key = wait_key()
+            if key == "q":
+                raise QuitApp()
+            if key in ("enter", "escape", "left"):
+                return
+
+
 def list_window_rows(entry_lines=1, fixed=5):
     total = shutil.get_terminal_size().lines
     return max(1, (total - fixed) // entry_lines)
@@ -1007,11 +1041,9 @@ def grab_bag_view():
     if not plan["items"]:
         print("\nNothing to do.")
     else:
-        choice = read_input(
-            f"\nImport {len(plan['fresh'])} video(s) and clear the playlist? "
-            "[y/N]: "
-        ).lower()
-        if choice not in ("y", "yes"):
+        if not read_confirmation(
+            f"\nImport {len(plan['fresh'])} video(s) and clear the playlist?"
+        ):
             print("Cancelled.")
         else:
             result = execute_grab_bag_plan(session, plan)
@@ -1022,7 +1054,7 @@ def grab_bag_view():
             )
             for failure in result["failed"]:
                 print(f"Failed to remove: {failure}")
-    read_input("\nPress Enter to go back... ")
+    wait_for_back()
 
 
 def grab_bag_command(keep=False, dry_run=False):

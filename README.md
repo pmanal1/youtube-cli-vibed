@@ -33,6 +33,9 @@ Long lists scroll automatically as the cursor moves. When input is not a
 terminal (e.g. piping), the menus fall back to the older numbered prompts
 (`s1,s3` batch syntax still works there).
 
+When syncing the AI Grab Bag playlist from the menu, press `y` to confirm
+immediately, or `n`/Enter/Esc to cancel. Press Enter/Esc to return afterwards.
+
 ## Notes
 
 This project was made with AI, hence the repo name.
