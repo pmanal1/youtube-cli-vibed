@@ -50,6 +50,7 @@ MAX_RESULTS = 5
 FETCH_LIMIT = 25
 SHORTS_MAX_SECONDS = 60
 WATCH_URL = "https://youtube.com/watch?v={}"
+PLAYLIST_URL = "https://www.youtube.com/playlist?list={}"
 WHITELIST_FILE = "whitelist.txt"
 WATCH_LATER_FILE = "watch-later.txt"
 WATCHED_FILE = "watched.txt"
@@ -640,7 +641,7 @@ def print_videos(videos, watched=None):
         line = f"   {video['published']}  {video['duration']}"
         if video.get("thumbnail"):
             line += f"  thumb={video['thumbnail']}"
-        print(f"{line}  id={video['id']}")
+        print(f"{line}  type={video.get('type', 'video')}")
 
 
 def extract_video_id(text):
@@ -665,6 +666,15 @@ def open_video(video_id):
     return f"Could not launch a browser. Open this URL manually:\n{url}"
 
 
+def open_entry(entry):
+    if entry.get("type", "video") == "playlist":
+        url = PLAYLIST_URL.format(entry["id"])
+        if webbrowser.open(url):
+            return f"Opened {url}"
+        return f"Could not launch a browser. Open this URL manually:\n{url}"
+    return open_video(entry["id"])
+
+
 def parse_picks(text, count):
     picks = []
     warnings = []
@@ -681,49 +691,167 @@ def watch_later_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), WATCH_LATER_FILE)
 
 
+def parse_watch_later_line(line):
+    parts = [part.strip() for part in line.split("|")]
+    value = parts[0]
+    parsed = urlparse(value)
+    playlist_id = None
+    if parsed.hostname and parsed.hostname.lower() in {
+        "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"
+    }:
+        playlist_id = parse_qs(parsed.query).get("list", [None])[0]
+    elif len(value) > 11 and re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        playlist_id = value
+    if playlist_id and re.fullmatch(r"[A-Za-z0-9_-]+", playlist_id):
+        item_id, item_type = playlist_id, "playlist"
+    elif VIDEO_ID_RE.fullmatch(value):
+        item_id, item_type = value, "video"
+    else:
+        return None
+    return {
+        "id": item_id,
+        "type": item_type,
+        "title": parts[1] if len(parts) > 1 and parts[1] else item_id,
+        "published": parts[2] if len(parts) > 2 else "?",
+        "duration": parts[3] if len(parts) > 3 else "?",
+    }
+
+
 def load_watch_later():
-    videos = []
     path = watch_later_path()
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                parts = [part.strip() for part in line.split("|")]
-                if parts and VIDEO_ID_RE.fullmatch(parts[0]):
-                    videos.append(
-                        {
-                            "id": parts[0],
-                            "title": parts[1] if len(parts) > 1 else parts[0],
-                            "published": parts[2] if len(parts) > 2 else "?",
-                            "duration": parts[3] if len(parts) > 3 else "?",
-                        }
-                    )
-    return videos
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        return [item for line in fh if (item := parse_watch_later_line(line))]
+
+
+def populate_playlist_metadata(entries):
+    playlists = [entry for entry in entries if entry.get("type") == "playlist"]
+    if not playlists:
+        return
+    try:
+        session = make_session()
+        for start in range(0, len(playlists), 50):
+            chunk = playlists[start:start + 50]
+            data = api_get(session, "playlists", part="snippet,contentDetails",
+                           id=",".join(entry["id"] for entry in chunk))
+            details = {item["id"]: item for item in data.get("items", [])}
+            for entry in chunk:
+                item = details.get(entry["id"], {})
+                date = item.get("snippet", {}).get("publishedAt", "")
+                count = item.get("contentDetails", {}).get("itemCount")
+                if entry["published"] in ("", "?") and date:
+                    entry["published"] = date[:10]
+                if count is not None:
+                    entry["duration"] = f"{count} video{'s' if count != 1 else ''}"
+    except (CliError, requests.RequestException, ValueError):
+        pass  # The playlist can still be opened if metadata is unavailable.
+    for entry in playlists:
+        if entry["published"] in ("", "?"):
+            entry["published"] = "date unavailable"
+        if entry["duration"] in ("", "?"):
+            entry["duration"] = "video count unavailable"
 
 
 def append_watch_later(videos):
     with open(watch_later_path(), "a", encoding="utf-8") as fh:
         for video in videos:
             fh.write(
-                f"{video['id']} | {video['title'].replace('|', '/')} | "
+                f"{PLAYLIST_URL.format(video['id']) if video.get('type') == 'playlist' else video['id']} | {video['title'].replace('|', '/')} | "
                 f"{video['published']} | {video['duration']}\n"
             )
 
 
 def save_to_watch_later(video):
-    if any(v["id"] == video["id"] for v in load_watch_later()):
+    if any((v["type"], v["id"]) == (video.get("type", "video"), video["id"]) for v in load_watch_later()):
         return f"Already saved: {video['title']}"
     append_watch_later([video])
     return f"Saved to {WATCH_LATER_FILE}: {video['title']}"
 
 
+def add_watch_later_entry(text, entries):
+    value = text.strip()
+    if not value:
+        return "Add cancelled."
+    parsed = urlparse(value)
+    if parsed.hostname:
+        host = parsed.hostname.lower()
+        if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
+            query = parse_qs(parsed.query)
+            value = query.get("list", query.get("v", [""]))[0]
+        elif host == "youtu.be":
+            value = parsed.path.strip("/")
+        else:
+            return "Enter a valid YouTube video or playlist ID."
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        return "Enter a valid YouTube video or playlist ID."
+    try:
+        session = make_session()
+        endpoints = ("videos", "playlists") if VIDEO_ID_RE.fullmatch(value) else ("playlists",)
+        for endpoint in endpoints:
+            data = api_get(session, endpoint, part="snippet,contentDetails", id=value)
+            if not data.get("items"):
+                continue
+            item = data["items"][0]
+            snippet = item.get("snippet", {})
+            details = item.get("contentDetails", {})
+            is_playlist = endpoint == "playlists"
+            duration = (f"{details['itemCount']} video{'s' if details['itemCount'] != 1 else ''}"
+                        if is_playlist and "itemCount" in details
+                        else format_duration(details.get("duration", "")) if not is_playlist
+                        else "?")
+            entry = {"id": value, "type": "playlist" if is_playlist else "video",
+                     "title": snippet.get("title", value),
+                     "published": snippet.get("publishedAt", "?")[:10],
+                     "duration": duration or "?"}
+            status = save_to_watch_later(entry)
+            if status.startswith("Saved to "):
+                entries.append(entry)
+            return status
+        return "Video or playlist not found."
+    except (CliError, requests.RequestException, ValueError):
+        return "Could not validate the ID with YouTube. Check your connection and API key."
+
+
+@contextlib.contextmanager
+def line_input_console():
+    """Temporarily restore normal line editing inside a key-driven menu."""
+    if not raw_keys_supported():
+        yield
+        return
+    fd = sys.stdin.fileno()
+    old_state = termios.tcgetattr(fd)
+    state = termios.tcgetattr(fd)
+    state[3] |= termios.ICANON | termios.ECHO
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, state)
+        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.flush()
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_state)
+        sys.stdout.write(HIDE_CURSOR)
+        sys.stdout.flush()
+
+
+def prompt_add_watch_later(entries):
+    with line_input_console():
+        value = read_input("\nVideo or playlist ID (Enter to cancel): ")
+    return add_watch_later_entry(value, entries)
+
+
 def remove_from_watch_later(video):
-    remaining = [v for v in load_watch_later() if v["id"] != video["id"]]
-    with open(watch_later_path(), "w", encoding="utf-8") as fh:
-        for v in remaining:
-            fh.write(
-                f"{v['id']} | {v['title'].replace('|', '/')} | "
-                f"{v['published']} | {v['duration']}\n"
-            )
+    path = watch_later_path()
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    with open(path, "w", encoding="utf-8") as fh:
+        for line in lines:
+            item = parse_watch_later_line(line)
+            if item and (item["type"], item["id"]) == (
+                video.get("type", "video"), video["id"]
+            ):
+                continue
+            fh.write(line)
     return f"Removed from {WATCH_LATER_FILE}: {video['title']}"
 
 
@@ -737,7 +865,7 @@ def _video_entry_lines(video, watched_ids, saved_ids, allow_watch, allow_remove)
     meta = f"{video['published']}  {video['duration']}"
     if video.get("thumbnail"):
         meta += f"  thumb={video['thumbnail']}"
-    meta += f"  id={video['id']}"
+    meta += f"  type={video.get('type', 'video')}"
     return [label, meta]
 
 
@@ -757,7 +885,7 @@ def _video_list_view_keys(
     if allow_watch:
         actions += ", w=watched"
     if allow_remove:
-        actions += ", d=remove"
+        actions += ", a=add, d=remove"
     actions += ", left/esc=back, q=quit"
     status = ""
     cursor = 0
@@ -775,7 +903,7 @@ def _video_list_view_keys(
             extra = ()
             if not videos:
                 extra = (empty_note,)
-                hints = "esc=back, q=quit"
+                hints = "a=add, esc=back, q=quit" if allow_remove else "esc=back, q=quit"
             else:
                 hints = actions
             rows = list_window_rows(entry_lines=2, fixed=6)
@@ -787,12 +915,15 @@ def _video_list_view_keys(
                 return
             if key == "q":
                 raise QuitApp()
+            if key == "a" and allow_remove:
+                status = prompt_add_watch_later(videos)
+                continue
             if not videos:
                 continue
             if key in ("up", "down"):
                 cursor = move_cursor(cursor, key, len(videos))
             elif key in ("enter", "right"):
-                status = open_video(videos[cursor]["id"])
+                status = open_entry(videos[cursor])
             elif key == "left":
                 return
             elif key == "s":
@@ -816,11 +947,11 @@ def _video_list_view_numbered(videos, title, allow_remove=False, allow_watch=Fal
             if allow_watch:
                 actions += ", watched [w1,w3]"
             if allow_remove:
-                actions += ", remove [d1,d3]"
+                actions += ", add [a], remove [d1,d3]"
             prompt = f"\n{actions}, Enter=back, q=quit: "
         else:
-            print(f"{WATCH_LATER_FILE} is empty. Run Search and save videos with s1,2.")
-            prompt = "\nEnter=back, q=quit: "
+            print(f"{WATCH_LATER_FILE} is empty. " + ("Press a to add an item." if allow_remove else "Run Search and save videos with s1,2."))
+            prompt = "\na=add, Enter=back, q=quit: " if allow_remove else "\nEnter=back, q=quit: "
         if status:
             print(f"\n{status}")
             status = ""
@@ -829,6 +960,9 @@ def _video_list_view_numbered(videos, title, allow_remove=False, allow_watch=Fal
             return
         if choice in QUIT_WORDS:
             raise QuitApp()
+        if allow_remove and choice == "a":
+            status = prompt_add_watch_later(videos)
+            continue
         if videos and choice[0] == "s":
             rest = choice[4:] if choice.startswith("save") else choice[1:]
             if not rest.replace(" ", "").rstrip(","):
@@ -860,19 +994,20 @@ def _video_list_view_numbered(videos, title, allow_remove=False, allow_watch=Fal
             status = "\n".join(messages)
             continue
         if videos and choice.isdigit() and 1 <= int(choice) <= len(videos):
-            status = open_video(videos[int(choice) - 1]["id"])
+            status = open_entry(videos[int(choice) - 1])
             continue
         status = "Not a valid choice."
 
 
 def watch_later_view():
     videos = load_watch_later()
+    populate_playlist_metadata(videos)
     video_list_view(
         videos,
         f"Watch later ({WATCH_LATER_FILE})",
         allow_remove=True,
         empty_note=(
-            f"{WATCH_LATER_FILE} is empty. Run Search and press s on a video to save it."
+            f"{WATCH_LATER_FILE} is empty. Press a to add a video or playlist."
         ),
     )
 

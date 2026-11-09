@@ -8,7 +8,7 @@ A tiny CLI that can browse a whitelisted channel's last 5 videos.
 
 - Whitelist channels that you can view.
 - View whitelisted channel's 5 most recently uploaded videos.
-- Save videos to watch later.
+- Save videos to watch later, and add playlists to the same list.
 
 ## Requirements
 
@@ -27,7 +27,20 @@ quit. On video lists, press:
 
 - `s` — save the highlighted video to `watch-later.txt`
 - `w` — toggle the highlighted video as watched (search results)
-- `d` — remove the highlighted video from `watch-later.txt`
+- `d` — remove the highlighted item from `watch-later.txt`
+- `a` — add a video or playlist by ID on the watch-later screen
+
+To add a playlist, put its YouTube playlist URL (or playlist ID) on a line in
+`watch-later.txt`. An optional title, date, and duration can follow, separated
+by `|`, just like video entries:
+
+```text
+https://www.youtube.com/playlist?list=PLexample123456789 | My playlist
+```
+
+Playlist creation dates and video counts are fetched from YouTube when available.
+Selecting a playlist opens it in your browser. Existing video entries continue
+to work as before.
 
 Long lists scroll automatically as the cursor moves. When input is not a
 terminal (e.g. piping), the menus fall back to the older numbered prompts
